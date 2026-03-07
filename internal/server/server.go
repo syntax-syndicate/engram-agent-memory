@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/Gentleman-Programming/engram/internal/store"
 )
@@ -20,12 +21,29 @@ var loadServerStats = func(s *store.Store) (*store.Stats, error) {
 	return s.Stats()
 }
 
+// SyncStatusProvider returns the current sync status. This is implemented
+// by autosync.Manager and injected from cmd/engram/main.go.
+type SyncStatusProvider interface {
+	Status() SyncStatus
+}
+
+// SyncStatus mirrors autosync.Status to avoid a direct import cycle.
+type SyncStatus struct {
+	Phase               string     `json:"phase"`
+	LastError           string     `json:"last_error,omitempty"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	BackoffUntil        *time.Time `json:"backoff_until,omitempty"`
+	LastSyncAt          *time.Time `json:"last_sync_at,omitempty"`
+}
+
 type Server struct {
-	store  *store.Store
-	mux    *http.ServeMux
-	port   int
-	listen func(network, address string) (net.Listener, error)
-	serve  func(net.Listener, http.Handler) error
+	store      *store.Store
+	mux        *http.ServeMux
+	port       int
+	listen     func(network, address string) (net.Listener, error)
+	serve      func(net.Listener, http.Handler) error
+	onWrite    func() // called after successful local writes (for autosync notification)
+	syncStatus SyncStatusProvider
 }
 
 func New(s *store.Store, port int) *Server {
@@ -33,6 +51,24 @@ func New(s *store.Store, port int) *Server {
 	srv.mux = http.NewServeMux()
 	srv.routes()
 	return srv
+}
+
+// SetOnWrite configures a callback invoked after every successful local write.
+// This is used to notify autosync.Manager via NotifyDirty().
+func (s *Server) SetOnWrite(fn func()) {
+	s.onWrite = fn
+}
+
+// SetSyncStatus configures the sync status provider for the /sync/status endpoint.
+func (s *Server) SetSyncStatus(provider SyncStatusProvider) {
+	s.syncStatus = provider
+}
+
+// notifyWrite calls the onWrite callback if configured (best-effort, non-blocking).
+func (s *Server) notifyWrite() {
+	if s.onWrite != nil {
+		s.onWrite()
+	}
 }
 
 func (s *Server) Start() error {
@@ -94,6 +130,9 @@ func (s *Server) routes() {
 
 	// Stats
 	s.mux.HandleFunc("GET /stats", s.handleStats)
+
+	// Sync status (degraded-state visibility for autosync)
+	s.mux.HandleFunc("GET /sync/status", s.handleSyncStatus)
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
@@ -126,6 +165,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusCreated, map[string]string{"id": body.ID, "status": "created"})
 }
 
@@ -142,6 +182,7 @@ func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, map[string]string{"id": id, "status": "completed"})
 }
 
@@ -175,6 +216,7 @@ func (s *Server) handleAddObservation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
 }
 
@@ -195,6 +237,7 @@ func (s *Server) handlePassiveCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, result)
 }
 
@@ -275,6 +318,7 @@ func (s *Server) handleUpdateObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, obs)
 }
 
@@ -292,6 +336,7 @@ func (s *Server) handleDeleteObservation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, map[string]any{
 		"id":          id,
 		"status":      "deleted",
@@ -343,6 +388,7 @@ func (s *Server) handleAddPrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusCreated, map[string]any{"id": id, "status": "saved"})
 }
 
@@ -415,6 +461,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.notifyWrite()
 	jsonResponse(w, http.StatusOK, result)
 }
 
@@ -441,6 +488,28 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, stats)
+}
+
+// ─── Sync Status ─────────────────────────────────────────────────────────────
+
+func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if s.syncStatus == nil {
+		jsonResponse(w, http.StatusOK, map[string]any{
+			"enabled": false,
+			"message": "background sync is not configured",
+		})
+		return
+	}
+
+	status := s.syncStatus.Status()
+	jsonResponse(w, http.StatusOK, map[string]any{
+		"enabled":              true,
+		"phase":                status.Phase,
+		"last_error":           status.LastError,
+		"consecutive_failures": status.ConsecutiveFailures,
+		"backoff_until":        status.BackoffUntil,
+		"last_sync_at":         status.LastSyncAt,
+	})
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
