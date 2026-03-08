@@ -688,6 +688,89 @@ func TestFilterFunctionsAndTimeNormalization(t *testing.T) {
 	}
 }
 
+func TestFilterByProjectEntityLevel(t *testing.T) {
+	projA := "proj-a"
+
+	data := &store.ExportData{
+		Version:    "0.1.0",
+		ExportedAt: "2025-01-01 00:00:00",
+		Sessions: []store.Session{
+			{ID: "s-match", Project: "proj-a", StartedAt: "2025-01-01 10:00:00"},
+			{ID: "s-empty", Project: "", StartedAt: "2025-01-01 11:00:00"},
+			{ID: "s-other", Project: "proj-b", StartedAt: "2025-01-01 12:00:00"},
+			{ID: "s-orphan", Project: "proj-c", StartedAt: "2025-01-01 13:00:00"},
+		},
+		Observations: []store.Observation{
+			// obs in matching session — included via session
+			{ID: 1, SessionID: "s-match", CreatedAt: "2025-01-01 10:00:00"},
+			// obs with own project but session has empty project — included via entity project
+			{ID: 2, SessionID: "s-empty", Project: &projA, CreatedAt: "2025-01-01 11:00:00"},
+			// obs with own project but session has different project — included via entity project
+			{ID: 3, SessionID: "s-other", Project: &projA, CreatedAt: "2025-01-01 12:00:00"},
+			// obs with nil project in non-matching session — excluded
+			{ID: 4, SessionID: "s-other", Project: nil, CreatedAt: "2025-01-01 12:30:00"},
+		},
+		Prompts: []store.Prompt{
+			// prompt in matching session — included via session
+			{ID: 1, SessionID: "s-match", CreatedAt: "2025-01-01 10:00:00"},
+			// prompt with own project but session has empty project — included via entity project
+			{ID: 2, SessionID: "s-empty", Project: "proj-a", CreatedAt: "2025-01-01 11:00:00"},
+			// prompt with wrong project in non-matching session — excluded
+			{ID: 3, SessionID: "s-other", Project: "proj-b", CreatedAt: "2025-01-01 12:00:00"},
+		},
+	}
+
+	result := filterByProject(data, "proj-a")
+
+	// Observations: IDs 1, 2, 3 should be included
+	if len(result.Observations) != 3 {
+		t.Fatalf("expected 3 observations, got %d: %+v", len(result.Observations), result.Observations)
+	}
+	obsIDs := map[int64]bool{}
+	for _, o := range result.Observations {
+		obsIDs[o.ID] = true
+	}
+	for _, id := range []int64{1, 2, 3} {
+		if !obsIDs[id] {
+			t.Errorf("expected observation %d to be included", id)
+		}
+	}
+	if obsIDs[4] {
+		t.Error("observation 4 (nil project, non-matching session) should be excluded")
+	}
+
+	// Prompts: IDs 1, 2 should be included
+	if len(result.Prompts) != 2 {
+		t.Fatalf("expected 2 prompts, got %d: %+v", len(result.Prompts), result.Prompts)
+	}
+	promptIDs := map[int64]bool{}
+	for _, p := range result.Prompts {
+		promptIDs[p.ID] = true
+	}
+	if !promptIDs[1] || !promptIDs[2] {
+		t.Error("expected prompts 1 and 2 to be included")
+	}
+	if promptIDs[3] {
+		t.Error("prompt 3 (wrong project, non-matching session) should be excluded")
+	}
+
+	// Sessions: s-match (direct), s-empty (referenced by obs 2), s-other (referenced by obs 3)
+	// s-orphan should be excluded (not referenced by any included entity)
+	if len(result.Sessions) != 3 {
+		t.Fatalf("expected 3 sessions, got %d: %+v", len(result.Sessions), result.Sessions)
+	}
+	sessIDs := map[string]bool{}
+	for _, s := range result.Sessions {
+		sessIDs[s.ID] = true
+	}
+	if !sessIDs["s-match"] || !sessIDs["s-empty"] || !sessIDs["s-other"] {
+		t.Error("expected sessions s-match, s-empty, s-other to be included")
+	}
+	if sessIDs["s-orphan"] {
+		t.Error("session s-orphan should be excluded (no referenced entities)")
+	}
+}
+
 func TestGzipHelpers(t *testing.T) {
 	t.Run("roundtrip", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "chunk.jsonl.gz")

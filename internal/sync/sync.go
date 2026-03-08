@@ -398,23 +398,46 @@ func filterByProject(data *store.ExportData, project string) *store.ExportData {
 		ExportedAt: data.ExportedAt,
 	}
 
+	// Step 1: index sessions that match by their own project
 	sessionIDs := make(map[string]bool)
 	for _, s := range data.Sessions {
 		if s.Project == project {
-			result.Sessions = append(result.Sessions, s)
 			sessionIDs[s.ID] = true
 		}
 	}
+
+	// Step 2: observations — match by own project OR by session
+	referencedSessionIDs := make(map[string]bool)
 	for _, o := range data.Observations {
-		if sessionIDs[o.SessionID] {
+		match := sessionIDs[o.SessionID]
+		if !match && o.Project != nil && *o.Project == project {
+			match = true
+		}
+		if match {
 			result.Observations = append(result.Observations, o)
+			referencedSessionIDs[o.SessionID] = true
 		}
 	}
+
+	// Step 3: prompts — match by own project OR by session
 	for _, p := range data.Prompts {
-		if sessionIDs[p.SessionID] {
+		match := sessionIDs[p.SessionID]
+		if !match && p.Project == project {
+			match = true
+		}
+		if match {
 			result.Prompts = append(result.Prompts, p)
+			referencedSessionIDs[p.SessionID] = true
 		}
 	}
+
+	// Step 4: include sessions that matched directly or are referenced by included entities
+	for _, s := range data.Sessions {
+		if sessionIDs[s.ID] || referencedSessionIDs[s.ID] {
+			result.Sessions = append(result.Sessions, s)
+		}
+	}
+
 	return result
 }
 

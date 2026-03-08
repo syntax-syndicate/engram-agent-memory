@@ -1682,7 +1682,7 @@ func (s *Store) GetSyncedChunks() (map[string]bool, error) {
 
 // RecordSyncedChunk marks a chunk as imported/exported so it won't be processed again.
 func (s *Store) RecordSyncedChunk(chunkID string) error {
-	_, err := s.db.Exec(
+	_, err := s.execHook(s.db,
 		"INSERT OR IGNORE INTO sync_chunks (chunk_id) VALUES (?)",
 		chunkID,
 	)
